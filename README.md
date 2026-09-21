@@ -6,6 +6,11 @@ NexusAuth 是 NexusNet 鉴权网络中的「权威」：持有权威 ed25519 私
 
 > 记录格式、验证算法与常量见 NexusNet 的 `docs/auth.md`；本边车负责其中的**发布侧**。
 
+## 文档
+
+- [`docs/getting-started.md`](./docs/getting-started.md) —— 从零建立鉴权网络（部署、入网、注册受保护服务、排障）。
+- [`docs/admin.md`](./docs/admin.md) —— 管理指令 schema、`mac` 计算与管理工具对接。
+
 ## 架构
 
 ```mermaid
