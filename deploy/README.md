@@ -104,4 +104,4 @@ systemctl show <pkg>            # 查看运行状态详情
 - 单元以 `NoNewPrivileges`、`ProtectSystem=strict` 等加固，通过 `ReadWritePaths` 放行配置与数据目录的写权限；
   日志经 stdout/stderr 交给 journald。
 - 收到 `SIGTERM` 时程序优雅关闭，`TimeoutStopSec=15` 防止卡死被强杀。
-- 本模板只监听 `127.0.0.1:<port>`，需与 NexusNet 节点 `local_services` 中登记的 `host`/`port` 对应。
+- 本边车只监听 `127.0.0.1:<port>`，需与 NexusNet 节点 `local_services` 中登记的 `host`/`port` 对应。

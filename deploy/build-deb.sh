@@ -97,8 +97,8 @@ Architecture: ${ARCH}
 Maintainer: OAHD
 Depends: libc6 (>= 2.31)
 Installed-Size: ${INSTALLED_SIZE}
-Description: ${NAME} - NexusNet 后端服务脚手架
- 实现 NexusNet 节点与边车/后端之间的 CBOR v2 协议，业务逻辑在 src/service.rs 中实现。
+Description: ${NAME} - NexusNet 鉴权权威边车
+ 签发并发布鉴权网络的 COSE 白名单/索引记录，管理成员并定时续期。
  以 NexusNet 专用用户 nexusnet 运行，日志交由 journald 管理。
 EOF
 

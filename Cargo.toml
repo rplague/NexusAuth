@@ -4,13 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22"
+chacha20poly1305 = "0.10"
 chrono = "0.4.44"
 ciborium = "0.2"
 colored = "3.1.1"
+coset = "0.4"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 flate2 = "1.1.9"
+hkdf = "0.12"
+hmac = "0.12"
+libp2p-identity = { version = "0.2", features = ["peerid", "rand"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+sha2 = "0.10"
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"
 uuid = { version = "1.23.1", features = ["serde", "v4"] }

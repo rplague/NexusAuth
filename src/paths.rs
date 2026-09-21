@@ -1,9 +1,9 @@
 //! 统一路径解析。
 //!
-//! - systemd 部署：由 `NEXUSAUTH_HOME` / `NEXUSAUTH_CONFIG` / `NEXUSAUTH_LOG_PATH`
-//!   环境变量锚定标准目录。
-//! - 本地 `cargo run`：未设置任何环境变量时回退当前目录（`./config.toml`、`./log`），
-//!   以兼容既有行为。
+//! - systemd 部署：由 `NEXUSAUTH_HOME` / `NEXUSAUTH_CONFIG` / `NEXUSAUTH_LOG_PATH` /
+//!   `NEXUSAUTH_AUTHORITY_KEY` / `NEXUSAUTH_STATE` 环境变量锚定标准目录。
+//! - 本地 `cargo run`：未设置任何环境变量时回退当前目录（`./config.toml`、`./log`、
+//!   `./authority.key`、`./auth_state.toml`），以兼容既有行为。
 
 use std::env;
 use std::path::PathBuf;
@@ -39,4 +39,30 @@ pub fn log_path() -> PathBuf {
         return home;
     }
     PathBuf::from("./")
+}
+
+/// 权威私钥文件路径。
+///
+/// 优先级：`NEXUSAUTH_AUTHORITY_KEY` → `$NEXUSAUTH_HOME/authority.key` → `./authority.key`。
+pub fn authority_key_path() -> PathBuf {
+    if let Some(path) = env_path("NEXUSAUTH_AUTHORITY_KEY") {
+        return path;
+    }
+    if let Some(home) = env_path("NEXUSAUTH_HOME") {
+        return home.join("authority.key");
+    }
+    PathBuf::from("./authority.key")
+}
+
+/// 成员状态文件路径。
+///
+/// 优先级：`NEXUSAUTH_STATE` → `$NEXUSAUTH_HOME/auth_state.toml` → `./auth_state.toml`。
+pub fn state_path() -> PathBuf {
+    if let Some(path) = env_path("NEXUSAUTH_STATE") {
+        return path;
+    }
+    if let Some(home) = env_path("NEXUSAUTH_HOME") {
+        return home.join("auth_state.toml");
+    }
+    PathBuf::from("./auth_state.toml")
 }

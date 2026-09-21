@@ -1,5 +1,5 @@
 [Unit]
-Description=@BIN@ backend (NexusNet sidecar protocol v2)
+Description=@BIN@ - NexusNet 鉴权权威边车
 Documentation=file:/etc/@PKG@/README.md
 Wants=network-online.target
 After=network-online.target
