@@ -1,0 +1,5 @@
+/target
+/config.toml
+/log
+/module/*.txt
+/module/*.wav
