@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::log::{LogLevel, LogStruct};
 use crate::protocol::{
     self, AddKeyResult, Message, PROTOCOL_VERSION, PqStatusResult, PublicIpInfo, QueryKeyResult,
-    RelayStatusResult, SidecarError, SuccessResult,
+    RelayStatusResult, SidecarError, SuccessResult, WhoamiResult,
 };
 use crate::runtime::Runtime;
 use crate::service;
@@ -90,6 +90,13 @@ impl BackendClient {
     pub async fn query_public_ip(&self) -> Result<PublicIpInfo, SidecarError> {
         let id = Uuid::new_v4();
         self.call_result(id, Message::QueryPublicIp { id }).await
+    }
+
+    /// 查询本节点 PeerId
+    pub async fn whoami(&self) -> Result<String, SidecarError> {
+        let id = Uuid::new_v4();
+        let result: WhoamiResult = self.call_result(id, Message::Whoami { id }).await?;
+        Ok(result.peer_id)
     }
 
     /// 重新拨号 bootstrap
@@ -566,6 +573,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whoami_call_round_trip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let node = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = stream.into_split();
+            match protocol::read_frame(&mut r).await.unwrap() {
+                Message::Whoami { id } => {
+                    let body = enc(&WhoamiResult {
+                        peer_id: "12D3KooWtest".into(),
+                    });
+                    protocol::write_frame(
+                        &mut w,
+                        &Message::Reply {
+                            id,
+                            ok: true,
+                            result: Some(body),
+                            error: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                other => panic!("unexpected {}", other.kind()),
+            }
+        });
+
+        let stream = connect(addr.port()).await;
+        let (r, w) = stream.into_split();
+        let client = BackendClient {
+            shared: Arc::new(Shared {
+                writer: Mutex::new(w),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+            }),
+            timeout: Duration::from_secs(5),
+        };
+        let read_task = tokio::spawn(read_loop(r, client.clone(), Runtime::not_ready_for_test()));
+        let peer = client.whoami().await.unwrap();
+        assert_eq!(peer, "12D3KooWtest");
+
+        node.await.unwrap();
+        read_task.abort();
+    }
+
+    #[tokio::test]
     async fn management_request_over_tcp() {
         let ctx = test_ctx();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -671,7 +724,7 @@ mod tests {
         };
         let responder_peer = libp2p_identity::PeerId::random().to_string();
 
-        // 模拟节点：应答发现（members key）与入网请求
+        // 模拟节点：应答发现 / whoami / 入网请求
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = crate::join::JoinServer::new(password, true);
@@ -683,17 +736,42 @@ mod tests {
             let (mut r, mut w) = stream.into_split();
             while let Ok(msg) = protocol::read_frame(&mut r).await {
                 match msg {
+                    Message::DiscoverProviders { id, .. } => {
+                        let body = enc(&vec![rp.clone()]);
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::Whoami { id } => {
+                        let body = enc(&WhoamiResult {
+                            peer_id: "12D3KooWself".into(),
+                        });
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
                     Message::QueryKey { id, key } => {
-                        // 发现查询正常服务 key；索引 key 无记录（跳过验签）
-                        let providers = if key.starts_with("/oahd/service/") {
-                            vec![rp.clone()]
-                        } else {
-                            vec![]
-                        };
+                        // 索引 key 无记录（跳过验签）
                         let body = enc(&QueryKeyResult {
                             key,
                             value: None,
-                            providers,
+                            providers: vec![],
                         });
                         protocol::write_frame(
                             &mut w,
@@ -776,6 +854,171 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_prefers_join_peers() {
+        use crate::config::{ConfigHandle, ServiceConfig};
+        use crate::join::{self, JoinRequest};
+        use crate::store::StoreSnapshot;
+
+        let password = "pw";
+        let network = "myorg";
+        let responder = Authority::generate(network).unwrap();
+        let responder_seed = responder.seed();
+        let snap = StoreSnapshot {
+            network: network.to_string(),
+            index_version: 1,
+            services: std::collections::BTreeMap::new(),
+            tombstones: std::collections::BTreeMap::new(),
+        };
+        let server = crate::join::JoinServer::new(password, true);
+
+        let x = libp2p_identity::PeerId::random().to_string();
+        let y = libp2p_identity::PeerId::random().to_string();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let y2 = y.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = stream.into_split();
+            while let Ok(msg) = protocol::read_frame(&mut r).await {
+                match msg {
+                    Message::Whoami { id } => {
+                        let body = enc(&WhoamiResult {
+                            peer_id: "12D3KooWself".into(),
+                        });
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::DiscoverProviders { id, .. } => {
+                        let body = enc(&vec![y2.clone()]);
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::QueryKey { id, key } => {
+                        let body = enc(&QueryKeyResult {
+                            key,
+                            value: None,
+                            providers: vec![],
+                        });
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::ServiceRequestTo {
+                        id, peer, payload, ..
+                    } => {
+                        let _ = tx.send(peer.clone());
+                        if peer == y2 {
+                            let req: JoinRequest = serde_json::from_slice(&payload).unwrap();
+                            let resp = server
+                                .respond(
+                                    network,
+                                    &req,
+                                    crate::authority::now_unix(),
+                                    &responder_seed,
+                                    &snap,
+                                )
+                                .unwrap();
+                            let bytes = serde_json::to_vec(&resp).unwrap();
+                            protocol::write_frame(
+                                &mut w,
+                                &Message::Reply {
+                                    id,
+                                    ok: true,
+                                    result: Some(bytes),
+                                    error: None,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        } else {
+                            protocol::write_frame(
+                                &mut w,
+                                &Message::Reply {
+                                    id,
+                                    ok: false,
+                                    result: None,
+                                    error: Some(crate::protocol::SidecarError::new(
+                                        "no_authority",
+                                        "not the authority",
+                                    )),
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nexusauth-join-order-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sc = ServiceConfig::default();
+        sc.network = network.into();
+        sc.management_password = password.into();
+        sc.join_mode = "require".into();
+        sc.join_service = "auth".into();
+        sc.join_peers = vec![x.clone()];
+        sc.authority_key_path = dir.join("authority.key").to_string_lossy().into_owned();
+        sc.state_path = dir.join("auth_state.toml").to_string_lossy().into_owned();
+        let config = ConfigHandle::new(sc);
+
+        let stream = connect(port).await;
+        let (r, w) = stream.into_split();
+        let client = BackendClient {
+            shared: Arc::new(Shared {
+                writer: Mutex::new(w),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+            }),
+            timeout: Duration::from_secs(5),
+        };
+        let read_task = tokio::spawn(read_loop(r, client.clone(), Runtime::not_ready_for_test()));
+
+        let (authority, _store) = join::attempt(&client, &config).await.unwrap();
+        assert_eq!(authority.public_key_b64(), responder.public_key_b64());
+
+        // 目标顺序应为 [join_peers 的 X, 发现到的 Y]
+        assert_eq!(rx.recv().await.unwrap(), x);
+        assert_eq!(rx.recv().await.unwrap(), y);
+
+        read_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn join_attempt_no_candidates() {
         use crate::config::{ConfigHandle, ServiceConfig};
         use crate::join::{self, JoinError};
@@ -787,11 +1030,23 @@ mod tests {
             let (mut r, mut w) = stream.into_split();
             while let Ok(msg) = protocol::read_frame(&mut r).await {
                 match msg {
-                    Message::QueryKey { id, key } => {
-                        let body = enc(&QueryKeyResult {
-                            key,
-                            value: None,
-                            providers: vec![],
+                    Message::DiscoverProviders { id, .. } => {
+                        let body = enc(&Vec::<String>::new());
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::Whoami { id } => {
+                        let body = enc(&WhoamiResult {
+                            peer_id: "12D3KooWself".into(),
                         });
                         protocol::write_frame(
                             &mut w,
@@ -851,11 +1106,23 @@ mod tests {
             let (mut r, mut w) = stream.into_split();
             while let Ok(msg) = protocol::read_frame(&mut r).await {
                 match msg {
-                    Message::QueryKey { id, key } => {
-                        let body = enc(&QueryKeyResult {
-                            key,
-                            value: None,
-                            providers: vec![rp.clone()],
+                    Message::DiscoverProviders { id, .. } => {
+                        let body = enc(&vec![rp.clone()]);
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::Whoami { id } => {
+                        let body = enc(&WhoamiResult {
+                            peer_id: "12D3KooWself".into(),
                         });
                         protocol::write_frame(
                             &mut w,
@@ -959,11 +1226,23 @@ mod tests {
             let (mut r, mut w) = stream.into_split();
             while let Ok(msg) = protocol::read_frame(&mut r).await {
                 match msg {
-                    Message::QueryKey { id, key } => {
-                        let body = enc(&QueryKeyResult {
-                            key,
-                            value: None,
-                            providers: vec![rp.clone()],
+                    Message::DiscoverProviders { id, .. } => {
+                        let body = enc(&vec![rp.clone()]);
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::Whoami { id } => {
+                        let body = enc(&WhoamiResult {
+                            peer_id: "12D3KooWself".into(),
                         });
                         protocol::write_frame(
                             &mut w,
@@ -1019,6 +1298,149 @@ mod tests {
         };
         let read_task = tokio::spawn(read_loop(r, client.clone(), Runtime::not_ready_for_test()));
 
+        let changed = replicate::sync_once(&ctx, &client).await;
+        assert!(changed);
+        assert_eq!(ctx.store.lock().unwrap().version("cmd"), Some(9));
+        assert_eq!(ctx.store.lock().unwrap().index_version(), 12);
+
+        read_task.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_once_tries_next_candidate() {
+        use crate::replicate;
+        use crate::store::{ServiceState, StoreSnapshot};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let ctx = test_ctx();
+        ctx.store
+            .lock()
+            .unwrap()
+            .create_service("cmd", &[])
+            .unwrap();
+
+        let mut services = BTreeMap::new();
+        services.insert(
+            "cmd".to_string(),
+            ServiceState {
+                version: 9,
+                members: std::iter::once(libp2p_identity::PeerId::random().to_string())
+                    .collect::<BTreeSet<_>>(),
+            },
+        );
+        let snapshot = StoreSnapshot {
+            network: "myorg".to_string(),
+            index_version: 12,
+            services,
+            tombstones: BTreeMap::new(),
+        };
+
+        let bad = libp2p_identity::PeerId::random().to_string();
+        let good = libp2p_identity::PeerId::random().to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let good2 = good.clone();
+        let snap = snapshot.clone();
+        tokio::spawn(async move {
+            let rep = replicate::RepAuth::new("pw", "myorg").unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = stream.into_split();
+            while let Ok(msg) = protocol::read_frame(&mut r).await {
+                match msg {
+                    Message::Whoami { id } => {
+                        let body = enc(&WhoamiResult {
+                            peer_id: "12D3KooWself".into(),
+                        });
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::DiscoverProviders { id, .. } => {
+                        let body = enc(&vec![bad.clone(), good2.clone()]);
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Message::ServiceRequestTo {
+                        id, peer, payload, ..
+                    } => {
+                        if peer == good2 {
+                            let req: replicate::SyncRequest =
+                                serde_json::from_slice(&payload).unwrap();
+                            let ts = crate::authority::now_unix();
+                            let mac = rep
+                                .sign_sync_response("myorg", &req.nonce, &snap, ts)
+                                .unwrap();
+                            let resp = replicate::SyncResponse {
+                                op: replicate::OP_SYNC_RESPONSE.to_string(),
+                                nonce: req.nonce,
+                                snapshot: snap.clone(),
+                                ts,
+                                mac,
+                            };
+                            let bytes = serde_json::to_vec(&resp).unwrap();
+                            protocol::write_frame(
+                                &mut w,
+                                &Message::Reply {
+                                    id,
+                                    ok: true,
+                                    result: Some(bytes),
+                                    error: None,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        } else {
+                            protocol::write_frame(
+                                &mut w,
+                                &Message::Reply {
+                                    id,
+                                    ok: false,
+                                    result: None,
+                                    error: Some(crate::protocol::SidecarError::new(
+                                        "no_authority",
+                                        "not the authority",
+                                    )),
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+
+        let stream = connect(port).await;
+        let (r, w) = stream.into_split();
+        let client = BackendClient {
+            shared: Arc::new(Shared {
+                writer: Mutex::new(w),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+            }),
+            timeout: Duration::from_secs(5),
+        };
+        let read_task = tokio::spawn(read_loop(r, client.clone(), Runtime::not_ready_for_test()));
+
+        // 候选中有一个坏对端 + 一个好对端：应跳过失败并最终成功
         let changed = replicate::sync_once(&ctx, &client).await;
         assert!(changed);
         assert_eq!(ctx.store.lock().unwrap().version("cmd"), Some(9));

@@ -4,7 +4,7 @@
 //!   所有边车共享密码，故都能签/验（与既有「持密码即可管理」模型一致）。
 //! - `replicate`：单服务变更（含墓碑），按版本 LWW 合并。
 //! - `sync_request` / `sync_response`：全量快照拉取合并（反熵）。
-//! - 发现复用正常服务列表 `/oahd/service/<service>` 的 providers。
+//! - 发现：`discover_providers(<service>)`，并用 `whoami` 排除自身。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -275,21 +275,27 @@ impl RepAuth {
     }
 }
 
-/// 发现服务列表中的边车节点 PeerId。
+/// 发现服务列表中的边车节点 PeerId（排除自身）。
 pub async fn discover_peers(client: &BackendClient, service: &str) -> Vec<String> {
-    let key = format!("/oahd/service/{service}");
-    match client.query_key(&key).await {
-        Ok(result) => result.providers,
+    let mut peers = match client.discover_providers(service).await {
+        Ok(peers) => peers,
         Err(e) => {
             LogStruct::new(
                 LogLevel::Debug,
                 "复制发现失败",
-                format!("{key}: {}", e.message),
+                format!("{service}: [{}] {}", e.code, e.message),
             )
             .emit();
             Vec::new()
         }
+    };
+    // 排除自身；whoami 失败（旧节点）则不过滤
+    if let Ok(me) = client.whoami().await {
+        peers.retain(|p| *p != me);
     }
+    peers.sort();
+    peers.dedup();
+    peers
 }
 
 /// 异步广播一次变更（不阻塞调用方；失败不重试）。
@@ -364,15 +370,36 @@ pub async fn broadcast(
     }
 }
 
-/// 反熵：随机拉取一个对端快照并合并；返回本地是否有变化。
+/// 反熵：遍历候选（打乱），跳过失败/自身，同步第一个成功的对端；
+/// 返回本地是否有变化。
 pub async fn sync_once(ctx: &Arc<AuthContext>, client: &BackendClient) -> bool {
-    let peers = discover_peers(client, &ctx.service_name).await;
+    let mut peers = discover_peers(client, &ctx.service_name).await;
     if peers.is_empty() {
         return false;
     }
-    let idx = (rand_core::OsRng.next_u32() as usize) % peers.len();
-    let peer = &peers[idx];
+    // Fisher–Yates 打乱，避免固定顺序
+    for i in (1..peers.len()).rev() {
+        let j = (rand_core::OsRng.next_u32() as usize) % (i + 1);
+        peers.swap(i, j);
+    }
 
+    for peer in &peers {
+        match sync_with_peer(ctx, client, peer).await {
+            Ok(changed) => return changed,
+            Err(e) => {
+                LogStruct::new(LogLevel::Warning, "反熵同步失败", format!("{peer}: {e}")).emit();
+            }
+        }
+    }
+    false
+}
+
+/// 与单个对端做一次反熵同步；返回本地是否有变化。
+async fn sync_with_peer(
+    ctx: &Arc<AuthContext>,
+    client: &BackendClient,
+    peer: &str,
+) -> Result<bool, String> {
     let nonce = random_b64(16);
     let ts = now_unix();
     let mut req = SyncRequest {
@@ -385,56 +412,26 @@ pub async fn sync_once(ctx: &Arc<AuthContext>, client: &BackendClient) -> bool {
     req.mac = ctx
         .replicate
         .sign_sync_request(&ctx.network, &req.nonce, req.ts);
-    let payload = match serde_json::to_vec(&req) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
+    let payload = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
 
-    let bytes = match client
+    let bytes = client
         .service_request_to(&ctx.service_name, peer, payload)
         .await
-    {
-        Ok(b) => b,
-        Err(e) => {
-            LogStruct::new(
-                LogLevel::Warning,
-                "反熵同步请求失败",
-                format!("{peer}: [{}] {}", e.code, e.message),
-            )
-            .emit();
-            return false;
-        }
-    };
-    let resp: SyncResponse = match serde_json::from_slice(&bytes) {
-        Ok(r) => r,
-        Err(e) => {
-            LogStruct::new(LogLevel::Warning, "反熵响应解析失败", e.to_string()).emit();
-            return false;
-        }
-    };
-    if let Err(e) = ctx
-        .replicate
+        .map_err(|e| format!("[{}] {}", e.code, e.message))?;
+    let resp: SyncResponse = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    ctx.replicate
         .verify_sync_response(&ctx.network, &nonce, &resp)
-    {
-        LogStruct::new(LogLevel::Warning, "反熵响应校验失败", e.to_string()).emit();
-        return false;
-    }
-    let changed = match ctx
+        .map_err(|e| e.to_string())?;
+    let changed = ctx
         .store
         .lock()
         .expect("store poisoned")
         .merge_snapshot(resp.snapshot)
-    {
-        Ok(c) => c,
-        Err(e) => {
-            LogStruct::new(LogLevel::Warning, "反熵合并失败", e.to_string()).emit();
-            return false;
-        }
-    };
+        .map_err(|e| e.to_string())?;
     if changed {
         ctx.publisher.notify_publish();
     }
-    changed
+    Ok(changed)
 }
 
 /// 反熵同步循环：每 `interval` 拉取一次。

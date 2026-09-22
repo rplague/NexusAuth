@@ -544,13 +544,26 @@ mod tests {
                         }
                     }
                     // 变更广播会先做发现查询：返回空 providers 即可
-                    Ok(Message::QueryKey { id, key }) => {
+                    Ok(Message::DiscoverProviders { id, .. }) => {
+                        let mut body = Vec::new();
+                        ciborium::ser::into_writer(&Vec::<String>::new(), &mut body).unwrap();
+                        protocol::write_frame(
+                            &mut w,
+                            &Message::Reply {
+                                id,
+                                ok: true,
+                                result: Some(body),
+                                error: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Ok(Message::Whoami { id }) => {
                         let mut body = Vec::new();
                         ciborium::ser::into_writer(
-                            &crate::protocol::QueryKeyResult {
-                                key,
-                                value: None,
-                                providers: vec![],
+                            &crate::protocol::WhoamiResult {
+                                peer_id: "12D3KooWself".into(),
                             },
                             &mut body,
                         )

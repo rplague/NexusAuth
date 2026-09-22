@@ -84,7 +84,7 @@ IndexDoc     = { "version": uint, "expires_at": uint,
 
 流程：
 
-1. 首个节点连接建立后，查询**正常服务列表** `/oahd/service/<join_service>` 的 providers 得到已入网边车的节点 PeerId，并合并配置的 `join_peers`（自身节点也在列表中，对其请求会失败并被跳过）。
+1. 首个节点连接建立后，用 `discover_providers(<join_service>)` 得到已入网边车的节点 PeerId，用 `whoami` **排除自身**；候选顺序为配置的 `join_peers` 优先、其后是发现结果。
 2. 向候选发送单轮证明 `join_request`：`mac = HMAC(K_mac, network‖nonce‖ts)`，`K_mac = HKDF(password, salt="nexusauth/join", info=network)`。
 3. 响应方校验 mac/ts/nonce 后，用双方 nonce 与密码派生的密钥以 `ChaCha20-Poly1305` 加密返回 `{ seed, 状态快照 }`，并用响应 mac 双向认证。
 4. 新边车校验（DHT 已有索引则用新公钥验签）、持久化 `authority.key`(0600) 与 `auth_state.toml`(0600)，**随后才启动发布**。
@@ -139,8 +139,9 @@ IndexDoc     = { "version": uint, "expires_at": uint,
 
 同一鉴权网络可有多个边车；成员变更在边车间复制，保证最终一致。
 
-- **变更广播 `replicate`**：本地管理变更应用后，异步向服务列表中发现的所有边车广播单服务变更（删除带墓碑），按服务版本 **LWW** 合并；失败不重试。
-- **反熵同步 `sync_request` / `sync_response`**：每 `renew_secs` 向一个对端拉取全量快照（含墓碑）并按版本合并，治愈离线期间漏掉的变更。
+- **发现**：`discover_providers(<service>)`，并用 `whoami` 排除自身。
+- **变更广播 `replicate`**：本地管理变更应用后，异步向发现到的所有边车广播单服务变更（删除带墓碑），按服务版本 **LWW** 合并；失败不重试。
+- **反熵同步 `sync_request` / `sync_response`**：每 `renew_secs` **遍历发现到的对端（跳过失败/自身）**，拉取全量快照（含墓碑）并按版本合并，治愈离线期间漏掉的变更。
 - **认证**：`K_rep = HKDF-SHA256(password, salt="nexusauth/replicate", info=network)`，`mac` 覆盖服务/版本/成员/墓碑/nonce/ts；删除以墓碑版本防止旧复制复活。
 - 复制消息不加密（成员列表公开），仅做完整性认证。
 
@@ -213,7 +214,7 @@ apt install -y ./target/packaging/nexusauth_<version>_amd64.deb
 
 帧：`u32_be(len) || cbor(message)`（`len ≤ 16 MiB`）；连接首帧必须为 `hello`，`PROTOCOL_VERSION = 2`。
 
-判别字段为文本 `t`：`hello` / `request` / `reply` / `list_services` / `discover_providers` / `query_public_ip` / `reconnect_bootstrap` / `reannounce_services` / `reload_config` / `relay_status` / `pq_status` / `auth_status` / `query_key` / `add_key` / `service_request` / `service_request_to`。
+判别字段为文本 `t`：`hello` / `request` / `reply` / `list_services` / `discover_providers` / `query_public_ip` / `whoami` / `reconnect_bootstrap` / `reannounce_services` / `reload_config` / `relay_status` / `pq_status` / `auth_status` / `query_key` / `add_key` / `service_request` / `service_request_to`。
 
 - 关联 id 为 UUID（线上编码为 16 字节 CBOR `bstr`）。
 - `add_key` 的 `value` 为 `bstr`，二进制安全；本边车以 `providing = false` 写入记录。

@@ -1,7 +1,7 @@
 //! 入网引导：以管理密码完成单轮证明，从在线边车取回 `K_auth` 与状态快照。
 //!
-//! - 发现：查询正常服务列表 `/oahd/service/<join_service>` 的 providers 得到已入网边车的
-//!   节点 PeerId，并与配置的 `join_peers` 合并为候选。
+//! - 发现：`discover_providers(<join_service>)` 得到已入网边车的节点 PeerId，用 `whoami`
+//!   排除自身，再与配置的 `join_peers` 合并为候选。
 //! - 请求：`mac = HMAC(K_mac, network‖nonce‖ts)`，`K_mac = HKDF(password, salt="nexusauth/join", info=network)`。
 //! - 响应：`seed`+`state` 以 `ChaCha20-Poly1305` 加密，密钥由双方 nonce 与密码派生；响应 mac 双向认证。
 //!
@@ -359,22 +359,23 @@ pub async fn attempt(
     let network = config.network();
     let password = config.management_password();
     let service = config.join_service();
-    // 发现：查询正常服务列表 `/oahd/service/<service>` 的 providers（已是字符串 PeerId）。
-    let service_key = format!("/oahd/service/{service}");
+    let me = client.whoami().await.ok();
 
-    let mut candidates: Vec<String> = Vec::new();
-    match client.query_key(&service_key).await {
-        Ok(result) => candidates.extend(result.providers),
+    // 候选：配置的 `join_peers` 优先，其次 DHT 发现的 providers。
+    let mut candidates: Vec<String> = config.join_peers();
+    match client.discover_providers(&service).await {
+        Ok(peers) => candidates.extend(peers),
         Err(e) => LogStruct::new(
             LogLevel::Debug,
             "入网发现失败",
-            format!("{service_key}: {}", e.message),
+            format!("{service}: [{}] {}", e.code, e.message),
         )
         .emit(),
     }
-    candidates.extend(config.join_peers());
+
+    // 去重并排除自身（whoami 失败则不过滤，兼容旧节点）
     let mut seen = HashSet::new();
-    candidates.retain(|p| seen.insert(p.clone()));
+    candidates.retain(|p| Some(p) != me.as_ref() && seen.insert(p.clone()));
 
     if candidates.is_empty() {
         return Err(JoinError::NoCandidates);

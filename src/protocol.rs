@@ -53,6 +53,8 @@ pub enum Message {
     DiscoverProviders { id: Uuid, service: String },
     /// 后端 -> 节点：查询本节点公网地址
     QueryPublicIp { id: Uuid },
+    /// 后端 -> 节点：查询本节点 PeerId
+    Whoami { id: Uuid },
     /// 后端 -> 节点：重新拨号 bootstrap
     ReconnectBootstrap { id: Uuid },
     /// 后端 -> 节点：重新宣告本地服务
@@ -101,6 +103,7 @@ impl Message {
             | Message::ListServices { id }
             | Message::DiscoverProviders { id, .. }
             | Message::QueryPublicIp { id }
+            | Message::Whoami { id }
             | Message::ReconnectBootstrap { id }
             | Message::ReannounceServices { id }
             | Message::ReloadConfig { id }
@@ -123,6 +126,7 @@ impl Message {
             Message::ListServices { .. } => "list_services",
             Message::DiscoverProviders { .. } => "discover_providers",
             Message::QueryPublicIp { .. } => "query_public_ip",
+            Message::Whoami { .. } => "whoami",
             Message::ReconnectBootstrap { .. } => "reconnect_bootstrap",
             Message::ReannounceServices { .. } => "reannounce_services",
             Message::ReloadConfig { .. } => "reload_config",
@@ -144,6 +148,12 @@ pub struct PublicIpInfo {
     pub ipv4: Option<String>,
     #[serde(default)]
     pub ipv6: Option<String>,
+}
+
+/// `whoami`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhoamiResult {
+    pub peer_id: String,
 }
 
 /// `query_key`
@@ -318,6 +328,7 @@ mod tests {
             service: "example".into(),
         });
         round_trip(Message::QueryPublicIp { id });
+        round_trip(Message::Whoami { id });
         round_trip(Message::ReconnectBootstrap { id });
         round_trip(Message::ReannounceServices { id });
         round_trip(Message::ReloadConfig { id });
@@ -408,5 +419,11 @@ mod tests {
         };
         let decoded: RelayStatusResult = decode_result(&enc(&relay)).unwrap();
         assert_eq!(decoded, relay);
+
+        let who = WhoamiResult {
+            peer_id: "12D3KooWabc".into(),
+        };
+        let decoded: WhoamiResult = decode_result(&enc(&who)).unwrap();
+        assert_eq!(decoded, who);
     }
 }

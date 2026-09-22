@@ -134,7 +134,7 @@ bootstrap_nodes = ["/ip4/<node-a-ip>/tcp/5000/p2p/<node-a-peerid>"]
 
 1. 起 **NexusAuth**（开始监听）。
 2. 起 **NexusNet**（拨入边车；并 bootstrap 到 node-a 接入 P2P）。
-3. 边车借这条连接执行入网：查询正常服务列表 `/oahd/service/auth` 发现已有边车 → 单轮口令证明 → 取回 `K_auth` 与状态快照 → 持久化 → 开始发布。
+3. 边车借这条连接执行入网：`discover_providers("auth")` 发现已有边车、`whoami` 排除自身（候选以配置的 `join_peers` 优先）→ 单轮口令证明 → 取回 `K_auth` 与状态快照 → 持久化 → 开始发布。
    - 入网需要节点已完成 bootstrap 且能到达对端；失败会按 `join_retry_secs` 重试，直到 `join_timeout_secs`。
    - 成功日志：`入网成功 从 <peer> 取回权威密钥与状态`。
    - 失败且超时 → `require` 模式会 `[CRITICAL]` 退出（fail-closed）。
