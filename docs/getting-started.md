@@ -32,7 +32,8 @@
 
 2. **规划取值**：
    - 网络名 `network = "myorg"`
-   - **高熵管理口令**（`management_password`）
+   - 边车服务名 `service = "auth"`（必须与 NexusNet `local_services[].name` 一致）
+   - **高熵管理口令**（`management_password`，legacy 入网/管理路径使用）
    - 端口：节点 P2P 端口（默认 5000）、边车端口（默认 5100）、业务端口
 
 3. **连通性**：所有节点能互相访问 P2P 端口；至少一个节点作为 bootstrap 点。
@@ -48,6 +49,7 @@
 `/etc/nexusauth/config.toml`：
 
 ```toml
+service = "auth"                   # 必须与 NexusNet local_services[].name 一致
 port = 5100
 network = "myorg"
 join_mode = "init"                 # 首个节点：生成新权威密钥
@@ -111,12 +113,11 @@ require_auth = false              # 权威自身不参与鉴权
 `/etc/nexusauth/config.toml`：
 
 ```toml
+service = "auth"                   # 用于发现与寻址，必须与节点侧 local_services[].name 一致
 port = 5100
 network = "myorg"
 join_mode = "require"             # 默认：必须从在线边车入网
 management_password = "<同一口令>"
-join_service = "auth"             # 用于发现与寻址对端
-# join_peers = ["<node-a 的 PeerId>"]   # 可选兜底
 join_timeout_secs = 120           # 视网络就绪速度调整
 ```
 
@@ -134,11 +135,15 @@ bootstrap_nodes = ["/ip4/<node-a-ip>/tcp/5000/p2p/<node-a-peerid>"]
 
 1. 起 **NexusAuth**（开始监听）。
 2. 起 **NexusNet**（拨入边车；并 bootstrap 到 node-a 接入 P2P）。
-3. 边车借这条连接执行入网：`discover_providers("auth")` 发现已有边车、`whoami` 排除自身（候选以配置的 `join_peers` 优先）→ 单轮口令证明 → 取回 `K_auth` 与状态快照 → 持久化 → 开始发布。
+3. 边车借这条连接执行入网：`discover_providers(service)` 发现已有边车、`whoami` 排除自身 → 单轮口令证明 → 取回 `K_auth` 与状态快照 → 持久化 → 开始发布。
    - 入网需要节点已完成 bootstrap 且能到达对端；失败会按 `join_retry_secs` 重试，直到 `join_timeout_secs`。
    - 成功日志：`入网成功 从 <peer> 取回权威密钥与状态`。
    - 失败且超时 → `require` 模式会 `[CRITICAL]` 退出（fail-closed）。
 4. 验证：`/var/lib/nexusauth/authority.key` 与 `auth_state.toml` 生成；日志出现「鉴权网络就绪」。
+
+> legacy join 只依赖 `discover_providers(service)`，没有手工兜底列表。启用 `[cluster]` 时，Raft join 的候选来自配置中的 voters/learners 加上 DHT 发现结果，排除自身并去重；候选为空会失败。
+
+> **0.2.2 是破坏性配置变更**：旧 `join_service`、`join_peers`、`[cluster].service`、`[cluster].node_id` 以及 voter/learner 的 `node_id` 都会被拒绝。没有旧 Raft 数据需要迁移，但升级前必须重写配置。
 
 > 每个节点的 `[auth.networks.myorg].authority` 必须是**同一把公钥**（首个边车打印的那把）。
 

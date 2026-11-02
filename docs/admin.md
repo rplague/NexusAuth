@@ -102,7 +102,7 @@ payload = make_command("口令", "myorg", "add_members", "ocr", ["12D3KooW..."])
    - `client.service_request_to("auth", "<某边车节点 PeerId>", payload)`（指定对端），或
    - `client.service_request("auth", payload)`（自动选一个 `auth` 提供者；因状态已复制，选谁都行）。
 
-> `auth` 是边车在节点侧登记的服务名（`local_services[].name`），须与边车 `join_service` 一致。
+> `auth` 是边车在节点侧登记的服务名（`local_services[].name`），须与边车顶层 `service` 一致。
 
 ## 5. 错误码
 
@@ -124,4 +124,5 @@ payload = make_command("口令", "myorg", "add_members", "ocr", ["12D3KooW..."])
 - 时间戳偏差 ≤ 300s；`nonce` 单次有效。
 - 请求**不含明文口令**；口令仅用于本地计算 `mac`。
 - `service` 不得为保留名 `service`。
+- 0.2.2 起服务名统一为顶层 `service`；旧 `join_service`、`[cluster].service` 与配置中的 `node_id` 会被明确拒绝。NodeId 由 PeerId 派生，`status` 中的数字 `node_id` 不是配置项。
 - 撤销成员依赖索引过期与缓存 TTL；不续发即失效。

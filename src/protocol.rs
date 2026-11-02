@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::fmt;
 
 use serde::de::DeserializeOwned;
@@ -15,6 +17,8 @@ pub const MAX_FRAME: usize = 16 << 20;
 pub struct SidecarError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_error: Option<String>,
 }
 
 impl SidecarError {
@@ -22,7 +26,13 @@ impl SidecarError {
         Self {
             code: code.into(),
             message: message.into(),
+            publish_error: None,
         }
+    }
+
+    pub fn with_publish_error(mut self, error: impl Into<String>) -> Self {
+        self.publish_error = Some(error.into());
+        self
     }
 }
 

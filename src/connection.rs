@@ -35,9 +35,19 @@ pub struct BackendClient {
     timeout: Duration,
 }
 
+#[allow(dead_code)]
 impl BackendClient {
     /// 发送一条控制指令并等待节点 `reply`
     async fn call(&self, id: Uuid, msg: Message) -> Result<Vec<u8>, SidecarError> {
+        self.call_with_timeout(id, msg, self.timeout).await
+    }
+
+    async fn call_with_timeout(
+        &self,
+        id: Uuid,
+        msg: Message,
+        timeout_duration: Duration,
+    ) -> Result<Vec<u8>, SidecarError> {
         let (tx, rx) = oneshot::channel();
         self.shared.pending.lock().await.insert(id, tx);
 
@@ -46,7 +56,7 @@ impl BackendClient {
             return Err(SidecarError::new("io_error", e));
         }
 
-        match timeout(self.timeout, rx).await {
+        match timeout(timeout_duration, rx).await {
             Ok(Ok(Ok(data))) => Ok(data),
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err(SidecarError::new("node_gone", "response channel closed")),
@@ -195,8 +205,22 @@ impl BackendClient {
         peer: &str,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, SidecarError> {
+        self.service_request_to_with_timeout(service, peer, payload, self.timeout)
+            .await
+    }
+
+    /// 向指定 peer 发起 P2P 服务调用，使用调用方指定的超时。
+    ///
+    /// Raft RPC 需要毫秒级超时，不能沿用控制指令的 60 秒默认值。
+    pub async fn service_request_to_with_timeout(
+        &self,
+        service: &str,
+        peer: &str,
+        payload: Vec<u8>,
+        timeout_duration: Duration,
+    ) -> Result<Vec<u8>, SidecarError> {
         let id = Uuid::new_v4();
-        self.call(
+        self.call_with_timeout(
             id,
             Message::ServiceRequestTo {
                 id,
@@ -204,6 +228,7 @@ impl BackendClient {
                 peer: peer.to_string(),
                 payload,
             },
+            timeout_duration,
         )
         .await
     }
@@ -265,6 +290,7 @@ pub async fn handle_connection(stream: TcpStream, runtime: Arc<Runtime>) -> std:
     // 未就绪时用本连接执行入网。
     let ctx = runtime.ensure_ready(&client).await;
     let conn_id = if ctx.is_some() {
+        runtime.ensure_raft(&client).await;
         Some(runtime.publisher.register(client.clone()))
     } else {
         None
@@ -291,11 +317,14 @@ async fn read_loop(mut read_half: OwnedReadHalf, client: BackendClient, runtime:
                 tokio::spawn(async move {
                     let reply = match ctx {
                         Some(ctx) => {
+                            let forwarder: Option<&dyn crate::admin_v2::AdminForwarder> =
+                                Some(&client);
                             match service::handle_service_request(
                                 &service,
                                 &payload,
                                 &ctx,
                                 Some(&client),
+                                forwarder,
                             )
                             .await
                             {
@@ -366,6 +395,7 @@ async fn read_loop(mut read_half: OwnedReadHalf, client: BackendClient, runtime:
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
@@ -391,12 +421,17 @@ mod tests {
         )
         .unwrap();
         Arc::new(AuthContext {
-            authority,
+            authority: std::sync::RwLock::new(Some(authority)),
+            authority_key_path: dir.join("authority.key"),
             store: std::sync::Mutex::new(store),
             admin: AdminAuth::new("pw", network).unwrap(),
+            admin_keys: crate::admin_v2::AdminVerifier::default(),
             join: crate::join::JoinServer::new("pw", true),
             replicate: crate::replicate::RepAuth::new("pw", network).unwrap(),
             publisher: crate::publisher::PublisherHandle::new(),
+            raft: std::sync::RwLock::new(None),
+            admin_raft: std::sync::RwLock::new(None),
+            raft_required: false,
             network: network.to_string(),
             service_name: "auth".to_string(),
             expires_secs: 3600,
@@ -825,7 +860,6 @@ mod tests {
         sc.network = network.into();
         sc.management_password = password.into();
         sc.join_mode = "require".into();
-        sc.join_service = "auth".into();
         sc.authority_key_path = dir.join("authority.key").to_string_lossy().into_owned();
         sc.state_path = dir.join("auth_state.toml").to_string_lossy().into_owned();
         let config = ConfigHandle::new(sc);
@@ -854,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_prefers_join_peers() {
+    async fn join_uses_dht_discovery() {
         use crate::config::{ConfigHandle, ServiceConfig};
         use crate::join::{self, JoinRequest};
         use crate::store::StoreSnapshot;
@@ -871,7 +905,6 @@ mod tests {
         };
         let server = crate::join::JoinServer::new(password, true);
 
-        let x = libp2p_identity::PeerId::random().to_string();
         let y = libp2p_identity::PeerId::random().to_string();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -990,8 +1023,6 @@ mod tests {
         sc.network = network.into();
         sc.management_password = password.into();
         sc.join_mode = "require".into();
-        sc.join_service = "auth".into();
-        sc.join_peers = vec![x.clone()];
         sc.authority_key_path = dir.join("authority.key").to_string_lossy().into_owned();
         sc.state_path = dir.join("auth_state.toml").to_string_lossy().into_owned();
         let config = ConfigHandle::new(sc);
@@ -1010,8 +1041,7 @@ mod tests {
         let (authority, _store) = join::attempt(&client, &config).await.unwrap();
         assert_eq!(authority.public_key_b64(), responder.public_key_b64());
 
-        // 目标顺序应为 [join_peers 的 X, 发现到的 Y]
-        assert_eq!(rx.recv().await.unwrap(), x);
+        // 候选只来自 DHT，且只有一个 provider。
         assert_eq!(rx.recv().await.unwrap(), y);
 
         read_task.abort();

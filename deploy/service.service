@@ -23,6 +23,9 @@ LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal
 
+# 新建文件默认仅属主可读写（密钥、Raft 数据与配置）。
+UMask=0077
+
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

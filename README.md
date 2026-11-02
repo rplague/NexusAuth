@@ -10,6 +10,7 @@ NexusAuth 是 NexusNet 鉴权网络中的「权威」：持有权威 ed25519 私
 
 - [`docs/getting-started.md`](./docs/getting-started.md) —— 从零建立鉴权网络（部署、入网、注册受保护服务、排障）。
 - [`docs/admin.md`](./docs/admin.md) —— 管理指令 schema、`mac` 计算与管理工具对接。
+- [`docs/raft/operations.md`](./docs/raft/operations.md) —— Raft 控制面：3 voter 部署、CLI、备份恢复与安全加固。
 
 ## 架构
 
@@ -36,21 +37,25 @@ cargo run
 首次运行自动生成 `./config.toml`（权限 `0600`）：
 
 ```toml
+service = "auth"                   # 与 NexusNet local_services[].name 一致
+
 port = 5100
 network = ""                       # 必填：鉴权网络名
 authority_key_path = "./authority.key"
 state_path = "./auth_state.toml"
 expires_secs = 3600
 renew_secs = 1200
-management_password = ""           # 必填：为空则拒绝启动
+management_password = ""           # legacy 入网/管理必填：为空则拒绝启动
 
 join_mode = "require"              # require（默认，必须入网）/ init（生成新权威，首个节点）
-join_peers = []                    # 候选边车节点 PeerId（DHT 发现为空时兜底）
-join_service = "auth"              # 目标节点上边车的服务名
 join_timeout_secs = 30             # 入网总超时
 join_retry_secs = 5                # 单轮失败重试间隔
 allow_join = true                  # 是否响应他人的入网请求
 ```
+
+`service` 是唯一服务名，必须与 NexusNet `local_services[].name` 一致；它同时用于 DHT 发现、legacy join 寻址、Raft RPC 目标服务和 `AuthContext.service_name`。
+
+> **0.2.2 是破坏性配置变更**：旧 `join_service`、`join_peers`、`[cluster].service`、`[cluster].node_id` 以及 voter/learner 的 `node_id` 都会被明确拒绝，不会静默忽略或自动回退。旧 Raft 数据不存在，不需要迁移，但升级前必须重写配置。
 
 设置 `network` 与 `management_password` 后启动，日志会打印权威公钥：
 
@@ -84,12 +89,14 @@ IndexDoc     = { "version": uint, "expires_at": uint,
 
 流程：
 
-1. 首个节点连接建立后，用 `discover_providers(<join_service>)` 得到已入网边车的节点 PeerId，用 `whoami` **排除自身**；候选顺序为配置的 `join_peers` 优先、其后是发现结果。
+1. 首个节点连接建立后，用 `discover_providers(service)` 得到已入网边车的节点 PeerId，用 `whoami` **排除自身**；没有手工兜底列表。
 2. 向候选发送单轮证明 `join_request`：`mac = HMAC(K_mac, network‖nonce‖ts)`，`K_mac = HKDF(password, salt="nexusauth/join", info=network)`。
 3. 响应方校验 mac/ts/nonce 后，用双方 nonce 与密码派生的密钥以 `ChaCha20-Poly1305` 加密返回 `{ seed, 状态快照 }`，并用响应 mac 双向认证。
 4. 新边车校验（DHT 已有索引则用新公钥验签）、持久化 `authority.key`(0600) 与 `auth_state.toml`(0600)，**随后才启动发布**。
 
 安全：请求/响应**不含明文密码**；离线爆破防护依赖**高熵管理口令**（本协议不做 PAKE）。
+
+> legacy join 只依赖 `discover_providers(service)`。启用 `[cluster]` 后，Raft join 的候选为配置中的 voters/learners 加上 DHT 发现结果，排除自身并去重；候选为空会返回明确错误。
 
 ## 管理/状态指令
 
@@ -135,7 +142,7 @@ IndexDoc     = { "version": uint, "expires_at": uint,
 - 每条记录对所有在线连接发布；失败退避重试（3 次），下次续期再试。
 - `renew_secs` 应小于 `expires_secs`，且小于节点侧 Kademlia `record_ttl_seconds`。
 
-## 多边车状态复制
+## 多边车状态复制（legacy，未启用 Raft）
 
 同一鉴权网络可有多个边车；成员变更在边车间复制，保证最终一致。
 
@@ -152,6 +159,35 @@ IndexDoc     = { "version": uint, "expires_at": uint,
 - 索引版本取 `max`。
 
 代价：各边车续期时独立自增 `index_version`（版本号可能短暂不同），但内容一致；低版本发布被节点回滚保护忽略后，会由版本更高的边车随续期补发，最终一致。
+
+## Raft 控制面（可选）
+
+设置 `[cluster].enabled = true` 后，服务成员与集群成员由 Raft 控制面维护。`join_mode`、`management_password` 只属于 legacy 路径；Raft 模式可以不需要管理密码，learner 入网使用 `join_token_path`。
+
+```toml
+service = "auth"                   # 必须与 NexusNet local_services[].name 一致
+
+[cluster]
+enabled = true
+cluster_id = "prod-auth"
+bootstrap = true                   # 仅第一台首次启动为 true
+
+[[cluster.voters]]
+peer_id = "12D3KooW..."
+identity_key = "<base64 ed25519 公钥>"
+```
+
+配置里不再写 NodeId。内部 `NodeId` 仍为 `u64`，由 NexusNet `PeerId` 稳定派生：`SHA-256(PeerId)` 前 8 字节按大端解释，结果为 0 时取 1；本节点用 `whoami` PeerId 派生，voter/learner 用其 `peer_id` 派生。`status` 中显示的数字 `node_id` 是派生值，不是配置项。
+
+集群成员管理使用 PeerId：
+
+```bash
+nexusauthctl promote-voter --peer-id 12D3KooW... [--identity-key <base64>] --json
+nexusauthctl demote-voter  --peer-id 12D3KooW... --json
+nexusauthctl issue-join-token --audience 12D3KooW... --bind-peer 12D3KooW... --expires-in 600 --json
+```
+
+Raft join 候选来自配置中的 voters/learners 加上 `discover_providers(service)`，排除自身并去重；候选为空会失败。完整的 3 voter 部署、备份恢复与安全加固见 [`docs/raft/operations.md`](./docs/raft/operations.md)。
 
 ## 与 NexusNet 对接
 
@@ -233,9 +269,9 @@ CI（`.gitea/workflows/rust-ci.yml`）在每次 push 执行格式检查、测试
 
 ## 阶段与限制
 
-已实现**入网引导**（发现 + 取回 `K_auth` 与状态）、**多边车状态复制**（变更广播 + 反熵同步）与**确定性收敛 / 内建故障接管**。
+已实现**入网引导**（发现 + 取回 `K_auth` 与状态）、**legacy 多边车状态复制**（变更广播 + 反熵同步 + 确定性收敛）以及可选的 **Raft 控制面**（`[cluster].enabled = true`）。
 
-**不引入选主/租约**：多发布者幂等且高可用，以确定性合并（LWW + 删除胜出 + 规范哈希择大）保证最终一致；代价是各边车续期时 `index_version` 可能短暂不同。
+legacy 模式**不引入选主/租约**：多发布者幂等且高可用，以确定性合并（LWW + 删除胜出 + 规范哈希择大）保证最终一致；代价是各边车续期时 `index_version` 可能短暂不同。启用 Raft 后，成员变更与策略写入由 leader 串行化。
 
 ## 许可
 

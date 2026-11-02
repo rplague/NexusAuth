@@ -4,6 +4,14 @@ version = "0.2.2"
 edition = "2024"
 license = "GPL-3.0"
 
+[lib]
+name = "nexusauth"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexusauthctl"
+path = "src/bin/nexusauthctl.rs"
+
 [dependencies]
 base64 = "0.22"
 chacha20poly1305 = "0.10"
@@ -16,7 +24,9 @@ flate2 = "1.1.9"
 hkdf = "0.12"
 hmac = "0.12"
 libp2p-identity = { version = "0.2", features = ["peerid", "rand"] }
+openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+redb = "2.6.3"
 scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -24,3 +34,4 @@ sha2 = "0.10"
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }

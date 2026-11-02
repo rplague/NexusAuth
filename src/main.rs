@@ -1,41 +1,22 @@
-mod admin;
-// 权威签名核心：Phase 1 落地，自 Phase 2 起被配置与发布流程消费。
-#[allow(dead_code)]
-mod authority;
-mod config;
-mod connection;
-mod context;
-mod fsutil;
-mod join;
-mod log;
-mod paths;
-mod protocol;
-mod publisher;
-mod replay;
-mod replicate;
-mod runtime;
-mod service;
-// 成员状态：Phase 2 落地，自 Phase 3 起被管理指令消费。
-#[allow(dead_code)]
-mod store;
-
 use std::sync::Arc;
 use std::time::Duration;
 
-use config::ConfigHandle;
-use log::{LogLevel, LogStruct};
+use nexusauth::config::ConfigHandle;
+use nexusauth::log::{LogLevel, LogStruct};
+use nexusauth::{authority, connection, context, fsutil, publisher, runtime, security, store};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::authority::Authority;
-use crate::context::AuthContext;
-use crate::publisher::PublisherHandle;
-use crate::runtime::{Runtime, build_context};
-use crate::store::Store;
+use authority::Authority;
+use context::AuthContext;
+use publisher::PublisherHandle;
+use runtime::{Runtime, build_context};
+use store::Store;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let config = ConfigHandle::load_or_create_default();
+    security::audit_config_permissions(&config);
     let network = config.network();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let publisher = PublisherHandle::new();
@@ -51,7 +32,7 @@ async fn main() -> std::io::Result<()> {
         None
     } else {
         let password = config.management_password();
-        if password.is_empty() {
+        if password.is_empty() && !config.cluster_enabled() {
             LogStruct::new(
                 LogLevel::Critical,
                 "管理密码未配置",
@@ -155,7 +136,7 @@ fn build_initial(
         .emit();
         return Some(build_context(
             config,
-            authority,
+            Some(authority),
             store,
             publisher,
             shutdown_rx,
@@ -192,11 +173,30 @@ fn build_initial(
         .emit();
         return Some(build_context(
             config,
-            authority,
+            Some(authority),
             store,
             publisher,
             shutdown_rx,
         ));
+    }
+
+    // Raft learner：本地没有 authority seed 也必须能启动以接受 join/seed 分发。
+    if config.cluster_enabled() {
+        let store =
+            match Store::load_or_create(config.state_path(), network, &config.initial_members()) {
+                Ok(s) => s,
+                Err(e) => {
+                    LogStruct::new(LogLevel::Critical, "加载成员状态失败", e.to_string()).emit();
+                    std::process::exit(1);
+                }
+            };
+        LogStruct::new(
+            LogLevel::Important,
+            "等待 Raft 入网",
+            format!("{network}: learner 无 authority seed，等待 join token/leader 分发"),
+        )
+        .emit();
+        return Some(build_context(config, None, store, publisher, shutdown_rx));
     }
 
     LogStruct::new(

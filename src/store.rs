@@ -399,7 +399,16 @@ impl Store {
         Ok(changed)
     }
 
-    /// 提升索引版本（续期时使用）。返回新版本。
+    /// 由 Raft 状态机同步全局 `policy_epoch`（仅集群模式使用）。
+    pub fn set_index_version(&mut self, version: u64) -> Result<(), StoreError> {
+        if self.index_version != version {
+            self.index_version = version;
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// 提升索引版本（旧多写者路径续期时使用）。返回新版本。
     pub fn bump_index_version(&mut self) -> u64 {
         self.index_version += 1;
         let _ = self.save();
@@ -477,7 +486,9 @@ mod tests {
         let dir = temp_dir("seed");
         let path = dir.join("auth_state.toml");
         let p = peer();
-        let store = Store::load_or_create(&path, "myorg", &initial("cmd", &[p.clone()])).unwrap();
+        let store =
+            Store::load_or_create(&path, "myorg", &initial("cmd", std::slice::from_ref(&p)))
+                .unwrap();
 
         assert_eq!(store.network(), "myorg");
         assert_eq!(store.index_version(), 1);
@@ -503,7 +514,8 @@ mod tests {
         let p1 = peer();
         let p2 = peer();
         let mut store =
-            Store::load_or_create(&path, "myorg", &initial("cmd", &[p1.clone()])).unwrap();
+            Store::load_or_create(&path, "myorg", &initial("cmd", std::slice::from_ref(&p1)))
+                .unwrap();
         store.add_members("cmd", std::slice::from_ref(&p2)).unwrap();
 
         // 再次加载：配置里的初始成员被忽略，以状态文件为准
@@ -519,7 +531,8 @@ mod tests {
         let p1 = peer();
         let p2 = peer();
         let mut store =
-            Store::load_or_create(&path, "myorg", &initial("cmd", &[p1.clone()])).unwrap();
+            Store::load_or_create(&path, "myorg", &initial("cmd", std::slice::from_ref(&p1)))
+                .unwrap();
 
         assert_eq!(
             store.add_members("cmd", std::slice::from_ref(&p2)).unwrap(),

@@ -1,7 +1,7 @@
 //! 入网引导：以管理密码完成单轮证明，从在线边车取回 `K_auth` 与状态快照。
 //!
-//! - 发现：`discover_providers(<join_service>)` 得到已入网边车的节点 PeerId，用 `whoami`
-//!   排除自身，再与配置的 `join_peers` 合并为候选。
+//! - 发现：`discover_providers(<service>)` 得到已入网边车的节点 PeerId，用 `whoami`
+//!   排除自身，再去重得到候选（没有手工兜底列表）。
 //! - 请求：`mac = HMAC(K_mac, network‖nonce‖ts)`，`K_mac = HKDF(password, salt="nexusauth/join", info=network)`。
 //! - 响应：`seed`+`state` 以 `ChaCha20-Poly1305` 加密，密钥由双方 nonce 与密码派生；响应 mac 双向认证。
 //!
@@ -328,6 +328,11 @@ impl JoinServer {
         }
     }
 
+    /// 是否允许入网（Phase 4 默认 false）。
+    pub fn allowed(&self) -> bool {
+        self.allow
+    }
+
     /// 校验并响应一条入网请求。
     pub fn respond(
         &self,
@@ -358,24 +363,30 @@ pub async fn attempt(
 ) -> Result<(Authority, Store), JoinError> {
     let network = config.network();
     let password = config.management_password();
-    let service = config.join_service();
+    let service = config.service();
     let me = client.whoami().await.ok();
 
-    // 候选：配置的 `join_peers` 优先，其次 DHT 发现的 providers。
-    let mut candidates: Vec<String> = config.join_peers();
-    match client.discover_providers(&service).await {
-        Ok(peers) => candidates.extend(peers),
-        Err(e) => LogStruct::new(
-            LogLevel::Debug,
-            "入网发现失败",
-            format!("{service}: [{}] {}", e.code, e.message),
-        )
-        .emit(),
-    }
+    // 候选只来自 DHT 发现的 providers。
+    let candidates = match client.discover_providers(&service).await {
+        Ok(peers) => peers,
+        Err(e) => {
+            LogStruct::new(
+                LogLevel::Debug,
+                "入网发现失败",
+                format!("{service}: [{}] {}", e.code, e.message),
+            )
+            .emit();
+            Vec::new()
+        }
+    };
 
     // 去重并排除自身（whoami 失败则不过滤，兼容旧节点）
     let mut seen = HashSet::new();
-    candidates.retain(|p| Some(p) != me.as_ref() && seen.insert(p.clone()));
+    let mut candidates: Vec<String> = candidates
+        .into_iter()
+        .filter(|p| Some(p) != me.as_ref() && seen.insert(p.clone()))
+        .collect();
+    candidates.sort();
 
     if candidates.is_empty() {
         return Err(JoinError::NoCandidates);

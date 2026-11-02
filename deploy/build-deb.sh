@@ -40,6 +40,7 @@ VERSION="$(read_package_field version)"
 # Debian 包名规则：仅小写字母、数字、'-'、'+'、'.'；将大写转小写、'_' 转 '-'
 PKG="$(printf '%s' "${NAME}" | tr '[:upper:]_' '[:lower:]-')"
 BIN="${NAME}"
+CTL_BIN="nexusauthctl"
 UNIT_NAME="${PKG}"
 SERVICE_USER="nexusnet"
 
@@ -48,12 +49,14 @@ ARCH="$(dpkg --print-architecture)"
 OUT_DIR="${PROJECT_DIR}/target/packaging"
 STAGE="${OUT_DIR}/${PKG}_${VERSION}_${ARCH}"
 BINARY="${PROJECT_DIR}/target/release/${BIN}"
+CTL_BINARY="${PROJECT_DIR}/target/release/${CTL_BIN}"
 DEB="${OUT_DIR}/${PKG}_${VERSION}_${ARCH}.deb"
 
 echo "[build-deb] 包名=${PKG} 二进制=${BIN} 版本=${VERSION} 架构=${ARCH}"
 
 # 前置检查
 [ -x "${BINARY}" ] || { echo "[build-deb] 未找到二进制 ${BINARY}，请先: cargo build --release" >&2; exit 1; }
+[ -x "${CTL_BINARY}" ] || { echo "[build-deb] 未找到运维 CLI ${CTL_BINARY}，请先: cargo build --release" >&2; exit 1; }
 
 # 渲染打包素材中的占位符
 render() {
@@ -69,8 +72,9 @@ mkdir -p "${STAGE}/DEBIAN" \
          "${STAGE}/lib/systemd/system" \
          "${STAGE}/usr/lib/tmpfiles.d"
 
-# 二进制
+# 二进制：边车与管理员 CLI
 install -m 0755 "${BINARY}" "${STAGE}/usr/bin/${BIN}"
+install -m 0755 "${CTL_BINARY}" "${STAGE}/usr/bin/${CTL_BIN}"
 
 # 打包素材
 render "${SCRIPT_DIR}/service.service"       > "${STAGE}/lib/systemd/system/${UNIT_NAME}.service"

@@ -66,3 +66,44 @@ pub fn state_path() -> PathBuf {
     }
     PathBuf::from("./auth_state.toml")
 }
+
+/// Raft sidecar 身份私钥路径。
+///
+/// 优先级：`NEXUSAUTH_RAFT_IDENTITY` → `$NEXUSAUTH_HOME/raft_identity.key` →
+/// `./raft_identity.key`。
+pub fn raft_identity_key_path() -> PathBuf {
+    if let Some(path) = env_path("NEXUSAUTH_RAFT_IDENTITY") {
+        return path;
+    }
+    if let Some(home) = env_path("NEXUSAUTH_HOME") {
+        return home.join("raft_identity.key");
+    }
+    PathBuf::from("./raft_identity.key")
+}
+
+/// 接收入网 seed 的 X25519 交换私钥路径。
+///
+/// 优先级：`NEXUSAUTH_RAFT_SEED_KEY` → `$NEXUSAUTH_HOME/raft_seed_exchange.key` →
+/// `./raft_seed_exchange.key`。
+pub fn raft_seed_exchange_key_path() -> PathBuf {
+    if let Some(path) = env_path("NEXUSAUTH_RAFT_SEED_KEY") {
+        return path;
+    }
+    if let Some(home) = env_path("NEXUSAUTH_HOME") {
+        return home.join("raft_seed_exchange.key");
+    }
+    PathBuf::from("./raft_seed_exchange.key")
+}
+
+/// Raft 持久化数据（redb）路径。
+///
+/// 优先级：`NEXUSAUTH_RAFT_DATA` → `$NEXUSAUTH_HOME/raft.redb` → `./raft.redb`。
+pub fn raft_data_path() -> PathBuf {
+    if let Some(path) = env_path("NEXUSAUTH_RAFT_DATA") {
+        return path;
+    }
+    if let Some(home) = env_path("NEXUSAUTH_HOME") {
+        return home.join("raft.redb");
+    }
+    PathBuf::from("./raft.redb")
+}

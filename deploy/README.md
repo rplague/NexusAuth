@@ -17,10 +17,11 @@ NexusAuth 以原生的 Debian 打包（`.deb`）分发，由 `dpkg`/`apt` 管理
 
 | 文件 | 路径 | 属主/权限 | 说明 |
 |---|---|---|---|
-| 配置 | `/etc/<pkg>/config.toml` | `nexusnet:nexusnet 0644` | **首启由程序自动生成**（不随包分发） |
+| 配置 | `/etc/<pkg>/config.toml` | `nexusnet:nexusnet 0600` | **首启由程序自动生成**（不随包分发） |
 | 数据/日志 | `/var/lib/<pkg>/log` | `nexusnet:nexusnet 0700` | 轮转产物（`.gz`）同目录；journald 模式下不写文件 |
 | 日志 | journald | — | 由 systemd 采集/轮转/压缩/保留 |
-| 二进制 | `/usr/bin/<bin>` | `root:root 0755` | 主程序 |
+| 二进制 | `/usr/bin/<bin>` | `root:root 0755` | 边车主程序 |
+| CLI | `/usr/bin/nexusauthctl` | `root:root 0755` | 管理员运维 CLI |
 | 单元 | `/lib/systemd/system/<pkg>.service` | `root:root 0644` | systemd 单元 |
 
 路径由 `NEXUSAUTH_HOME` / `NEXUSAUTH_CONFIG` / `NEXUSAUTH_LOG_PATH` 环境变量锚定，
