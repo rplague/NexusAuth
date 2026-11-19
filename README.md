@@ -248,12 +248,12 @@ apt install -y ./target/packaging/nexusauth_<version>_amd64.deb
 
 ## 后端协议 v2
 
-帧：`u32_be(len) || cbor(message)`（`len ≤ 16 MiB`）；连接首帧必须为 `hello`，`PROTOCOL_VERSION = 2`。
+帧：`u32_be(len) || cbor(message)`（`len ≤ 32 MiB`）；连接首帧必须为 `hello`，`PROTOCOL_VERSION = 2`。
 
 判别字段为文本 `t`：`hello` / `request` / `reply` / `list_services` / `discover_providers` / `query_public_ip` / `whoami` / `reconnect_bootstrap` / `reannounce_services` / `reload_config` / `relay_status` / `pq_status` / `auth_status` / `query_key` / `add_key` / `service_request` / `service_request_to`。
 
 - 关联 id 为 UUID（线上编码为 16 字节 CBOR `bstr`）。
-- `add_key` 的 `value` 为 `bstr`，二进制安全；本边车以 `providing = false` 写入记录。
+- 二进制字段（`payload` / `result` / `add_key.value`）为 CBOR `bstr`；读侧兼容整数数组。需要 NexusNet ≥ 0.7.0。
 - 控制指令默认超时 60 秒。
 
 ## 测试与 CI
