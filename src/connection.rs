@@ -398,6 +398,7 @@ async fn read_loop(mut read_half: OwnedReadHalf, client: BackendClient, runtime:
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     use crate::admin::AdminAuth;
@@ -648,6 +649,58 @@ mod tests {
         let read_task = tokio::spawn(read_loop(r, client.clone(), Runtime::not_ready_for_test()));
         let peer = client.whoami().await.unwrap();
         assert_eq!(peer, "12D3KooWtest");
+
+        node.await.unwrap();
+        read_task.abort();
+    }
+
+    #[tokio::test]
+    async fn whoami_accepts_a_bstr_result() {
+        #[derive(serde::Serialize)]
+        struct BstrReply {
+            t: &'static str,
+            id: Uuid,
+            ok: bool,
+            #[serde(with = "crate::wire::bytes_or_seq_opt")]
+            result: Option<Vec<u8>>,
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let node = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = stream.into_split();
+            match protocol::read_frame(&mut r).await.unwrap() {
+                Message::Whoami { id } => {
+                    let body = enc(&WhoamiResult {
+                        peer_id: "12D3KooWtest".into(),
+                    });
+                    let frame = enc(&BstrReply {
+                        t: "reply",
+                        id,
+                        ok: true,
+                        result: Some(body),
+                    });
+                    let mut out = (frame.len() as u32).to_be_bytes().to_vec();
+                    out.extend_from_slice(&frame);
+                    w.write_all(&out).await.unwrap();
+                }
+                other => panic!("unexpected {}", other.kind()),
+            }
+        });
+
+        let stream = connect(addr.port()).await;
+        let (r, w) = stream.into_split();
+        let client = BackendClient {
+            shared: Arc::new(Shared {
+                writer: Mutex::new(w),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+            }),
+            timeout: Duration::from_secs(5),
+        };
+        let read_task = tokio::spawn(read_loop(r, client.clone(), Runtime::not_ready_for_test()));
+        assert_eq!(client.whoami().await.unwrap(), "12D3KooWtest");
 
         node.await.unwrap();
         read_task.abort();

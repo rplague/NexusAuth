@@ -27,3 +27,4 @@ pub mod service;
 // 成员状态：Phase 2 落地，自 Phase 3 起被管理指令消费。
 #[allow(dead_code)]
 pub mod store;
+pub mod wire;

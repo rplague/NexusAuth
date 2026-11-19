@@ -10,7 +10,7 @@ use uuid::Uuid;
 /// 协议版本
 pub const PROTOCOL_VERSION: u32 = 2;
 /// 单帧上限（含 CBOR 载荷）
-pub const MAX_FRAME: usize = 16 << 20;
+pub const MAX_FRAME: usize = 32 << 20;
 
 /// 结构化错误
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,13 +46,18 @@ pub enum Message {
     Request {
         id: Uuid,
         service: String,
+        #[serde(with = "crate::wire::bytes_or_seq")]
         payload: Vec<u8>,
     },
     /// 关联回复
     Reply {
         id: Uuid,
         ok: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::wire::bytes_or_seq_opt"
+        )]
         result: Option<Vec<u8>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<SidecarError>,
@@ -83,7 +88,11 @@ pub enum Message {
     AddKey {
         id: Uuid,
         key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::wire::bytes_or_seq_opt"
+        )]
         value: Option<Vec<u8>>,
         #[serde(default)]
         providing: bool,
@@ -92,6 +101,7 @@ pub enum Message {
     ServiceRequest {
         id: Uuid,
         service: String,
+        #[serde(with = "crate::wire::bytes_or_seq")]
         payload: Vec<u8>,
     },
     /// 后端 -> 节点：向指定 peer 发起 P2P 服务调用
@@ -99,6 +109,7 @@ pub enum Message {
         id: Uuid,
         service: String,
         peer: String,
+        #[serde(with = "crate::wire::bytes_or_seq")]
         payload: Vec<u8>,
     },
 }
@@ -170,7 +181,7 @@ pub struct WhoamiResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryKeyResult {
     pub key: String,
-    #[serde(default)]
+    #[serde(default, with = "crate::wire::bytes_or_seq_opt")]
     pub value: Option<Vec<u8>>,
     #[serde(default)]
     pub providers: Vec<String>,
@@ -304,6 +315,12 @@ mod tests {
         assert_eq!(decode_frame(body).unwrap(), msg);
     }
 
+    fn enc<T: Serialize>(v: &T) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(v, &mut buf).unwrap();
+        buf
+    }
+
     #[test]
     fn request_reply_round_trip() {
         let id = Uuid::new_v4();
@@ -400,12 +417,6 @@ mod tests {
 
     #[test]
     fn result_payloads_round_trip() {
-        fn enc<T: Serialize>(v: &T) -> Vec<u8> {
-            let mut buf = Vec::new();
-            ciborium::ser::into_writer(v, &mut buf).unwrap();
-            buf
-        }
-
         let ip = PublicIpInfo {
             ipv4: Some("1.2.3.4".into()),
             ipv6: None,
@@ -421,6 +432,21 @@ mod tests {
         let decoded: QueryKeyResult = decode_result(&enc(&key)).unwrap();
         assert_eq!(decoded, key);
 
+        #[derive(Serialize)]
+        struct RawKey<'a> {
+            key: &'a str,
+            #[serde(with = "crate::wire::bytes_or_seq_opt")]
+            value: Option<Vec<u8>>,
+            providers: Vec<String>,
+        }
+        let raw = enc(&RawKey {
+            key: "/k",
+            value: Some(vec![4, 5, 6]),
+            providers: vec![],
+        });
+        let decoded: QueryKeyResult = decode_result(&raw).unwrap();
+        assert_eq!(decoded.value, Some(vec![4, 5, 6]));
+
         let relay = RelayStatusResult {
             need_relay: true,
             target: 3,
@@ -435,5 +461,82 @@ mod tests {
         };
         let decoded: WhoamiResult = decode_result(&enc(&who)).unwrap();
         assert_eq!(decoded, who);
+    }
+
+    #[test]
+    fn bstr_frames_decode() {
+        #[derive(Serialize)]
+        struct RawRequest<'a> {
+            t: &'a str,
+            id: Uuid,
+            service: &'a str,
+            #[serde(with = "crate::wire::bytes_or_seq")]
+            payload: Vec<u8>,
+        }
+
+        let id = Uuid::new_v4();
+        let body = enc(&RawRequest {
+            t: "request",
+            id,
+            service: "auth",
+            payload: vec![1, 2, 3, 255],
+        });
+        match decode_frame(&body).unwrap() {
+            Message::Request {
+                id: got,
+                service,
+                payload,
+            } => {
+                assert_eq!(got, id);
+                assert_eq!(service, "auth");
+                assert_eq!(payload, vec![1, 2, 3, 255]);
+            }
+            other => panic!("unexpected {}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn encoded_frames_use_bstr() {
+        let id = Uuid::new_v4();
+        let frame = encode_frame(&Message::Reply {
+            id,
+            ok: true,
+            result: Some(vec![9, 8, 7]),
+            error: None,
+        })
+        .unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(&frame[4..]).unwrap();
+        let map = value.as_map().unwrap();
+        let result = map
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("result"))
+            .unwrap();
+        assert!(
+            matches!(result.1, ciborium::value::Value::Bytes(ref bytes) if bytes == &vec![9, 8, 7]),
+            "result 未编码为 CBOR bstr: {:?}",
+            result.1
+        );
+    }
+
+    #[test]
+    fn legacy_array_frames_still_decode() {
+        #[derive(Serialize)]
+        struct LegacyReply {
+            t: &'static str,
+            id: Uuid,
+            ok: bool,
+            result: Option<Vec<u8>>,
+        }
+
+        let body = enc(&LegacyReply {
+            t: "reply",
+            id: Uuid::new_v4(),
+            ok: true,
+            result: Some(vec![1, 2]),
+        });
+        assert!(matches!(
+            decode_frame(&body).unwrap(),
+            Message::Reply { .. }
+        ));
     }
 }
