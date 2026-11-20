@@ -48,6 +48,9 @@ use self::types::{
     TypeConfig,
 };
 
+/// join 专用超时：首次入网要写 Raft 日志 + 读策略快照，远慢于心跳 RPC。
+const JOIN_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 启动失败原因。
 #[derive(Debug)]
 pub enum RaftInitError {
@@ -779,7 +782,7 @@ impl RaftRuntime {
                     &self.service,
                     &peer,
                     payload.clone(),
-                    self.rpc_timeout,
+                    JOIN_RPC_TIMEOUT,
                 )
                 .await
             {

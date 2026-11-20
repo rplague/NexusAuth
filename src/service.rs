@@ -25,7 +25,7 @@ use crate::protocol::SidecarError;
 use crate::raft::seed::{SEED_DELIVERY_OP, SEED_DROP_OP};
 use crate::raft::transport::node_id_from_peer_id;
 use crate::raft::types::{AdminOutcome, PolicyCommand, PolicyResult};
-use crate::raft::{RaftRuntime, join as raft_join, seed, token};
+use crate::raft::{MembershipView, RaftRuntime, join as raft_join, seed, token};
 use crate::replicate::{self, RepError, ReplicateMsg, SyncRequest, SyncResponse};
 use crate::store::StoreError;
 
@@ -1498,11 +1498,23 @@ async fn handle_leader_join(
     .map_err(|e| SidecarError::new(e.code(), e.to_string()))?;
 
     let view = runtime.membership_view().await;
-    if view.is_member(req.node_id) {
-        return Err(SidecarError::new(
-            "already_member",
-            format!("node {} is already a member", req.node_id),
-        ));
+    if let Some(existing) = view.find(req.node_id).cloned() {
+        if existing.peer_id != req.peer_id {
+            return Err(SidecarError::new(
+                "bad_request",
+                "peer_id 与已登记的 node_id 不匹配",
+            ));
+        }
+        return reply_join(
+            runtime,
+            ctx,
+            &existing,
+            &view,
+            &req.token.jti,
+            &req.token.kid,
+            &req.edge_peer,
+        )
+        .await;
     }
 
     let state = runtime.policy_snapshot().await;
@@ -1563,6 +1575,28 @@ async fn handle_leader_join(
         members.learners.push(info.clone());
         members.learners.sort_by_key(|member| member.node_id);
     }
+    reply_join(
+        runtime,
+        ctx,
+        &info,
+        &members,
+        &req.token.jti,
+        &req.token.kid,
+        &req.edge_peer,
+    )
+    .await
+}
+
+/// 组装入网响应：新增 learner 与「已存在成员」两条路径共用。
+async fn reply_join(
+    runtime: &Arc<RaftRuntime>,
+    ctx: &Arc<AuthContext>,
+    info: &raft_join::MemberInfo,
+    members: &MembershipView,
+    jti: &str,
+    kid: &str,
+    edge_peer: &str,
+) -> Result<Vec<u8>, SidecarError> {
     let state = runtime.policy_snapshot().await;
     let response = raft_join::RaftJoinResponse {
         v: raft_join::RAFT_JOIN_VERSION,
@@ -1571,7 +1605,7 @@ async fn handle_leader_join(
         cluster_id: runtime.cluster_id().to_string(),
         network: ctx.network.clone(),
         node_id: info.node_id,
-        peer_id: info.peer_id,
+        peer_id: info.peer_id.clone(),
         role: "learner".into(),
         term: runtime.term().await,
         leader: runtime.leader_id().await,
@@ -1586,15 +1620,15 @@ async fn handle_leader_join(
     audit_member(
         &AdminRequestV2 {
             op: "raft_join".into(),
-            request_id: req.token.jti.clone(),
-            kid: req.token.kid.clone(),
+            request_id: jti.to_string(),
+            kid: kid.to_string(),
             ..Default::default()
         },
         "raft_join",
         &response.peer_id,
         "ok",
         state.policy_epoch,
-        req.edge_peer.as_str().into(),
+        edge_peer.into(),
         runtime,
     )
     .await;
