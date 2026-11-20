@@ -233,6 +233,7 @@ fn classify_admin_op(op: &str) -> AdminOpClass {
         }
         "publish_now" => AdminOpClass::Write,
         other if is_mutating_op(other) => AdminOpClass::Write,
+        other if is_member_management_op(other) => AdminOpClass::Write,
         _ => AdminOpClass::Unknown,
     }
 }
@@ -1965,6 +1966,43 @@ mod tests {
         let fx = fixture();
         let err = call(&fx, "nonsense", "", &[]).unwrap_err();
         assert_eq!(err.code, "unknown_op");
+    }
+
+    #[test]
+    fn member_management_ops_are_writes() {
+        for op in [
+            "add_learner",
+            "promote_voter",
+            "demote_voter",
+            "remove_member",
+            "issue_join_token",
+        ] {
+            assert_eq!(
+                super::classify_admin_op(op),
+                super::AdminOpClass::Write,
+                "op {op} 必须是写操作"
+            );
+        }
+    }
+
+    #[test]
+    fn read_and_unknown_ops_unchanged() {
+        assert_eq!(
+            super::classify_admin_op("status"),
+            super::AdminOpClass::Read
+        );
+        assert_eq!(
+            super::classify_admin_op("publish_now"),
+            super::AdminOpClass::Write
+        );
+        assert_eq!(
+            super::classify_admin_op("add_members"),
+            super::AdminOpClass::Write
+        );
+        assert_eq!(
+            super::classify_admin_op("nonsense"),
+            super::AdminOpClass::Unknown
+        );
     }
 
     #[test]
